@@ -7,12 +7,12 @@ verified on `emulator-5554` (Android 16, API 36, arm64).
 
 ## 1. Built and verified
 
-A working Android app, 106 automated tests, zero analyzer issues.
+A working Android app, 117 automated tests, zero analyzer issues.
 
 | Step | Command | Result |
 |---|---|---|
 | Static analysis | `flutter analyze` | **No issues found** (with four lints added on top of `flutter_lints`) |
-| Tests | `flutter test` | **106 passed**, ~4 s |
+| Tests | `flutter test` | **117 passed**, ~7 s (five consecutive clean runs) |
 | Debug build | `flutter build apk --debug` | **Built**, 7–15 s warm (Gradle and NDK already warm) |
 | On device | `flutter run -d emulator-5554` | **Launches**, renders correctly inside `SafeArea` |
 
@@ -20,12 +20,14 @@ Test breakdown:
 
 | File | Tests | Covers |
 |---|---|---|
-| `test/crypto_round_trip_test.dart` | 18 | round trips, randomised output, line wrapping, every failure mode |
 | `test/glyph_page_test.dart` | 32 | all five button states, direction detection, per-box controls, focus |
+| `test/crypto_round_trip_test.dart` | 18 | round trips, randomised output, line wrapping, every failure mode |
 | `test/envelope_test.dart` | 16 | framing, padding, version dispatch, whitespace scrubbing |
 | `test/key_rules_test.dart` | 15 | length in graphemes, NFC, generation |
 | `test/base62_test.dart` | 9 | alphabet, round trips, overflow, linear-time performance |
-| `test/glyph_worker_test.dart` | 8 | isolate round trip, typed errors across the boundary, cache |
+| `test/glyph_worker_test.dart` | 8 | isolate round trip, typed errors across the boundary |
+| `test/glyph_cipher_cache_test.dart` | 6 | derived-key cache contents and its cap |
+| `test/version_vectors_test.dart` | 5 | golden vectors pinning what each version byte means |
 
 Verified by hand on the emulator, with screenshots taken at each step:
 
@@ -109,16 +111,105 @@ component, and adds one package. See Deviations.
 |---|---|
 | Cipher | AES-256-GCM, 12-byte random nonce, 16-byte tag |
 | AAD | the 1-byte envelope version, so the KDF cannot be downgraded by flipping the byte |
-| KDF actually used | **Argon2id**, 16 MiB, 2 iterations, parallelism 1, 32-byte output — version byte `0x02` |
-| KDF also readable | PBKDF2-HMAC-SHA256, 210,000 iterations — version byte `0x01`, dispatched on the version byte |
+| KDF actually used | **Argon2id**, version byte `0x02` — see the frozen parameters below |
+| KDF also readable | PBKDF2-HMAC-SHA256, version byte `0x01` |
 | Salt | fresh 16 random bytes per message |
 | RNG | `Random.secure()` everywhere — salt, nonce, generated keys |
 | Key normalisation | Unicode NFC, then trim |
 
-Both formats are readable: `GlyphCipher._deriveKey` switches on the version
-byte, so a future default change does not orphan old messages. An unknown byte
-raises `UnsupportedVersion`. `test/envelope_test.dart` proves both `0x01` and
-`0x02` parse and that `0x00`, `0x03`, `0x7F` and `0xFF` are rejected.
+### The version byte is a contract, not a label
+
+**The envelope records the salt and the nonce but not the key-derivation cost
+parameters.** A version byte therefore has to imply them. `0x02` does not mean
+"Argon2id"; it means "Argon2id with exactly these numbers". Change one and
+every message ever written under the old value stops decrypting — and it fails
+as `WrongKeyOrTampered`, which a user cannot tell apart from having typed the
+wrong key. Silent, permanent, undiagnosable from the message itself.
+
+So the parameters are frozen, and this is the authoritative table. The same
+table appears at the top of `lib/core/envelope.dart`.
+
+| Byte | KDF | Frozen parameters |
+|---|---|---|
+| `0x01` | PBKDF2-HMAC-SHA256 | iterations 210,000; derived length 32 bytes |
+| `0x02` | Argon2id, RFC 9106 (version 0x13) | **m = 16384, t = 2, p = 1**, tag 32 bytes |
+
+Both versions share the rest of the format: AES-256-GCM, the 16-byte salt and
+12-byte nonce taken from the envelope, a 16-byte tag, and the version byte
+itself as associated data. Argon2id is used with no optional secret and no
+associated data.
+
+**To change a cost parameter:** allocate a *new* version byte, point
+`GlyphCipher.currentVersion` at it, keep the old byte readable in
+`GlyphCipher._deriveKey`, and add a golden vector for it. Do not edit the
+numbers. A future format that wants to tune costs freely should spend bytes
+recording them in the envelope.
+
+#### Units of the memory parameter: 1 KiB blocks
+
+Confirmed by reading `cryptography` 2.9.0 rather than assuming, because the
+name `memory` is ambiguous between blocks, KiB and bytes:
+
+- The public API documents it as the *"Minimum number of 1 kB blocks needed to
+  compute the hash"* (`lib/src/cryptography/algorithms.dart`, `int get memory`).
+- `lib/src/dart/argon2.dart` computes
+  `blockCount = 4 * parallelism * (memory ~/ (4 * parallelism))`, which is
+  RFC 9106's `m' = 4p·floor(m/4p)` — so `memory` is the spec's `m`.
+- `lib/src/dart/argon2_impl_default.dart` then allocates
+  `malloc.allocate(1024 * blockCount)`, and a block is `Uint32List(256)`.
+  1024 bytes per block.
+
+So `memory` is the standard Argon2 `m` in KiB: **m = 16384 is 16 MiB**, and the
+constant in the code is written `16 * 1024` to make that obvious.
+
+#### Choosing the parameters: measured, not guessed
+
+Benchmarked on `emulator-5554` (Android 16, arm64), debug/JIT build, five
+derivations per configuration, run inside a background isolate exactly as
+production does:
+
+| Parameters | min | **median** | max | Within a 500 ms budget? |
+|---|---|---|---|---|
+| m=16384 (16 MiB), t=2, p=1 | 89 ms | **101 ms** | 181 ms | yes — **adopted** |
+| m=32768 (32 MiB), t=3, p=1 | 263 ms | **297 ms** | 363 ms | yes |
+| m=65536 (64 MiB), t=3, p=1 | 544 ms | **571 ms** | 697 ms | **no** |
+
+**64 MiB / t=3 was evaluated and rejected: it exceeded 500 ms on every one of
+the five runs**, fastest included, so it is not a borderline miss. 32 MiB / t=3
+does fit the budget comfortably and remains available if the cost ceiling is
+ever revisited — it would need a new version byte.
+
+Two caveats on those numbers, both of which cut in favour of stronger
+parameters later rather than now:
+
+- They are **debug/JIT** measurements. A release AOT build will be faster, so
+  64 MiB might well come in under 500 ms once release packaging exists in pass
+  two. It cannot be measured today.
+- Argon2id allocates its memory for the duration of a derivation, natively via
+  `malloc`. At 64 MiB that is a real footprint on a low-end phone, and two
+  concurrent derivations would double it. The emulator handled 64 MiB without
+  failure, but memory cost — not just time — is part of the trade.
+
+#### The parameters are pinned by tests
+
+`test/version_vectors_test.dart` holds hard-coded armoured messages generated
+under each version byte's frozen parameters (by
+`dart run tool/make_test_vectors.dart`) and decrypts them against a hard-coded
+key and plaintext. Changing a cost parameter breaks those tests immediately.
+
+I verified the guard actually fires rather than trusting it: temporarily
+raising Argon2id memory from 16 MiB to 32 MiB failed the `0x02` vector test
+while the `0x01` vector test kept passing, which is exactly the expected
+signal. The parameter was then restored.
+
+This also closed a real gap. Before these vectors, **nothing decrypted a
+genuine version-`0x01` message end to end** — `test/envelope_test.dart` only
+proved a `0x01` envelope *parses*. The PBKDF2 read path is now exercised for
+real, so the dual-format promise is tested rather than asserted.
+
+An unknown version byte raises `UnsupportedVersion`;
+`test/envelope_test.dart` proves `0x00`, `0x03`, `0x7F` and `0xFF` are all
+rejected.
 
 ### Measured on the emulator
 
@@ -132,9 +223,19 @@ instrumentation that has since been removed.
 | Decrypt, same message again (cache hit) | **1, 1, 2, 14, 14** |
 
 So roughly **a fifth of a second** per operation, dominated entirely by
-Argon2id. Re-decrypting a message already seen is effectively instant, which
-is the derived-key cache doing its job — 1 ms against a 200 ms floor for a
-fresh derivation is only possible on a cache hit.
+Argon2id. Re-decrypting a message already seen is effectively instant: 1 ms
+against a ~100 ms floor for a fresh derivation is only possible on a cache
+hit.
+
+That the cache is responsible is asserted structurally rather than by the
+clock. `test/glyph_cipher_cache_test.dart` counts entries — a second decrypt
+of the same message must add none, two messages under one key must add two
+(fresh salt each), and 40 messages must not exceed the 32-entry cap. An
+earlier version compared elapsed microseconds between a cold and a warm
+decrypt; it was flaky under parallel test load, where the cached call could
+measure *slower* than the uncached one, and it could only ever show that
+something was faster, not why. The full suite now runs clean five times in a
+row.
 
 These are debug/JIT numbers on an emulator. A release AOT build should be
 faster; that is unverified because release packaging is pass two.

@@ -19,18 +19,35 @@ class GlyphCipher {
   GlyphCipher();
 
   /// Version byte written by this build. Argon2id is both stronger and, in
-  /// this package's pure-Dart implementations, roughly ten times faster than
-  /// PBKDF2 at comparable security, so it is the default.
+  /// this package's pure-Dart implementations, several times faster than
+  /// PBKDF2 at comparable cost, so it is the default.
   static const int currentVersion = kVersionArgon2id;
 
-  /// Argon2id cost parameters: 16 MiB of memory, 2 passes, single lane.
-  static const int _argonMemoryKib = 16 * 1024;
+  // The constants below are the frozen meaning of version byte 0x02. They are
+  // not tuning knobs: the envelope does not record them, so changing one
+  // orphans every message already written. See the version-byte contract at
+  // the top of envelope.dart before touching them, and allocate a new version
+  // byte instead.
+
+  /// Argon2id memory, in 1 KiB blocks. 16384 blocks = 16 MiB.
+  ///
+  /// The unit is the standard Argon2 `m` parameter: cryptography 2.9.0
+  /// documents it as the "number of 1 kB blocks" and allocates
+  /// `1024 * blockCount` bytes for it.
+  static const int _argonMemoryBlocks = 16 * 1024;
+
+  /// Argon2id passes over memory (`t`).
   static const int _argonIterations = 2;
+
+  /// Argon2id lanes (`p`). One, so derivation is deterministic and single
+  /// threaded; the work already happens off the UI thread in a worker isolate.
   static const int _argonParallelism = 1;
 
-  /// PBKDF2 cost, used only to read version-0x01 messages.
+  /// PBKDF2 iteration count. Frozen meaning of version byte 0x01, kept only
+  /// so messages in that format stay readable.
   static const int _pbkdf2Iterations = 210000;
 
+  /// Derived key length in bytes, for both KDFs: AES-256 needs 32.
   static const int _keyBytes = 32;
 
   /// Upper bound on cached derived keys. Each entry is 32 bytes plus overhead;
@@ -157,7 +174,7 @@ class GlyphCipher {
     switch (version) {
       case kVersionArgon2id:
         kdf = Argon2id(
-          memory: _argonMemoryKib,
+          memory: _argonMemoryBlocks,
           parallelism: _argonParallelism,
           iterations: _argonIterations,
           hashLength: _keyBytes,

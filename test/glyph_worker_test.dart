@@ -59,24 +59,16 @@ void main() {
     }
   });
 
-  test('re-decrypting the same message is served from the derived-key cache',
-      () async {
+  test('re-decrypting the same message returns the same plaintext', () async {
+    // Whether the derived-key cache was used is asserted deterministically in
+    // glyph_cipher_cache_test.dart. Comparing wall-clock timings here was
+    // flaky: under the load of the full suite running in parallel, the second
+    // (cached) call could measure slower than the first.
     final armoured = await codec.encrypt(key: key, plaintext: 'cache me');
 
-    final cold = Stopwatch()..start();
-    await codec.decrypt(key: key, armoured: armoured);
-    cold.stop();
-
-    final warm = Stopwatch()..start();
-    await codec.decrypt(key: key, armoured: armoured);
-    warm.stop();
-
-    // Argon2id dominates a cold decrypt, so a cached one is far cheaper.
-    // Compared loosely: this asserts the cache exists, not a specific speed.
-    expect(warm.elapsedMicroseconds, lessThan(cold.elapsedMicroseconds));
-    printOnFailure(
-      'cold ${cold.elapsedMicroseconds}us, warm ${warm.elapsedMicroseconds}us',
-    );
+    expect(await codec.decrypt(key: key, armoured: armoured), 'cache me');
+    expect(await codec.decrypt(key: key, armoured: armoured), 'cache me');
+    expect(await codec.decrypt(key: key, armoured: armoured), 'cache me');
   });
 
   test('clearing the cache does not break subsequent decrypts', () async {

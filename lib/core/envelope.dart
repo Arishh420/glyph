@@ -3,10 +3,58 @@ import 'dart:typed_data';
 import 'base62.dart';
 import 'glyph_errors.dart';
 
+// ---------------------------------------------------------------------------
+// Version bytes: the wire contract
+//
+// READ THIS BEFORE CHANGING ANY COST PARAMETER.
+//
+// The envelope records the salt and the nonce, but NOT the key-derivation cost
+// parameters. A version byte therefore has to *imply* them: it is a contract,
+// not a label. Change any number in the table below and every message ever
+// written under the old value stops decrypting -- and it fails as
+// `WrongKeyOrTampered`, which is indistinguishable to the user from having
+// typed the wrong key. Silent, permanent, and impossible to diagnose from the
+// message alone.
+//
+// | Byte | KDF                       | Frozen parameters                     |
+// |------|---------------------------|---------------------------------------|
+// | 0x01 | PBKDF2-HMAC-SHA256        | iterations 210000, dkLen 32 bytes     |
+// | 0x02 | Argon2id, RFC 9106 v0x13  | m = 16384, t = 2, p = 1, tag 32 bytes |
+//
+// Argon2id `m` is the standard memory parameter in 1 KiB blocks, so
+// m = 16384 is 16 MiB. That unit is confirmed in cryptography 2.9.0: the
+// public API documents `memory` as the "number of 1 kB blocks", and
+// `lib/src/dart/argon2_impl_default.dart` allocates `1024 * blockCount` bytes
+// with `blockCount = 4 * p * floor(m / 4p)` (RFC 9106's m'). Blocks are
+// `Uint32List(256)`, i.e. 1024 bytes each.
+//
+// Both versions share the rest of the format: AES-256-GCM, a 16-byte salt and
+// a 12-byte nonce from the envelope, a 16-byte tag, and the version byte
+// itself passed as associated data so it cannot be swapped for a weaker one.
+// Argon2id is used with no optional secret and no associated data.
+//
+// These parameters were chosen by measurement, not taste. On emulator-5554
+// (Android 16, arm64, debug/JIT), median of five derivations each:
+//
+//   m=16384 t=2  ->  101 ms   (chosen)
+//   m=32768 t=3  ->  297 ms
+//   m=65536 t=3  ->  571 ms   (rejected: over a 500 ms budget on every run)
+//
+// TO CHANGE A COST PARAMETER: allocate a NEW version byte, make it the value
+// of `GlyphCipher.currentVersion`, and keep the old byte readable in
+// `GlyphCipher._deriveKey`. Do not edit the numbers above. A future format
+// that wants to tune costs freely should record them in the envelope and
+// spend a byte on doing so.
+// ---------------------------------------------------------------------------
+
 /// Envelope version byte: PBKDF2-HMAC-SHA256 key stretching.
+///
+/// Frozen: 210,000 iterations, 32-byte output. See the table above.
 const int kVersionPbkdf2 = 0x01;
 
 /// Envelope version byte: Argon2id key stretching.
+///
+/// Frozen: m = 16384 (16 MiB), t = 2, p = 1, 32-byte tag. See the table above.
 const int kVersionArgon2id = 0x02;
 
 /// Wire format of a Glyph message.
