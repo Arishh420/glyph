@@ -4,9 +4,24 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- Required for the Dart VM to run in JIT mode in debug and profile. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
-	<key>com.apple.security.network.server</key>
-	<true/>
+	<!--
+	  flutter_secure_storage fails silently on macOS unless the app declares a
+	  keychain access group. This must be present in BOTH entitlement files:
+	  a Release build without it stores nothing and reports no error.
+	-->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.glyphpad.glyph</string>
+	</array>
+	<!--
+	  Deliberately absent: com.apple.security.network.client and
+	  com.apple.security.network.server. Glyph never touches the network.
+	  Note that the Flutter template ships network.server here, because the
+	  tool's hot reload talks to the app over a local socket; removing it is
+	  the intended trade for a provably offline app.
+	-->
 </dict>
 </plist>

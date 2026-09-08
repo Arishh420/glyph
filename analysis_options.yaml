@@ -28,8 +28,12 @@ linter:
   # `// ignore_for_file: name_of_lint` syntax on the line or in the file
   # producing the lint.
   rules:
-    # avoid_print: false  # Uncomment to disable the `avoid_print` rule
-    # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
+    # A cipher is a bad place for implicit behaviour, so a few extra rules
+    # beyond the flutter_lints defaults.
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    prefer_single_quotes: true
+    unawaited_futures: true
 
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options
