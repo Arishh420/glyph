@@ -19,10 +19,14 @@ import 'glyph_errors.dart';
 // | Byte | KDF                       | Frozen parameters                     |
 // |------|---------------------------|---------------------------------------|
 // | 0x01 | PBKDF2-HMAC-SHA256        | iterations 210000, dkLen 32 bytes     |
-// | 0x02 | Argon2id, RFC 9106 v0x13  | m = 16384, t = 2, p = 1, tag 32 bytes |
+// | 0x02 | Argon2id, RFC 9106 v0x13  | m = 32768, t = 3, p = 1, tag 32 bytes |
+//
+// 0x02 was redefined once before release (it briefly meant m = 16384, t = 2);
+// that was legal only because no message in that format existed outside this
+// repository, and any cost change from here on requires a new version byte.
 //
 // Argon2id `m` is the standard memory parameter in 1 KiB blocks, so
-// m = 16384 is 16 MiB. That unit is confirmed in cryptography 2.9.0: the
+// m = 32768 is 32 MiB. That unit is confirmed in cryptography 2.9.0: the
 // public API documents `memory` as the "number of 1 kB blocks", and
 // `lib/src/dart/argon2_impl_default.dart` allocates `1024 * blockCount` bytes
 // with `blockCount = 4 * p * floor(m / 4p)` (RFC 9106's m'). Blocks are
@@ -36,8 +40,8 @@ import 'glyph_errors.dart';
 // These parameters were chosen by measurement, not taste. On emulator-5554
 // (Android 16, arm64, debug/JIT), median of five derivations each:
 //
-//   m=16384 t=2  ->  101 ms   (chosen)
-//   m=32768 t=3  ->  297 ms
+//   m=16384 t=2  ->  101 ms   (pre-release value of 0x02, superseded)
+//   m=32768 t=3  ->  297 ms   (chosen)
 //   m=65536 t=3  ->  571 ms   (rejected: over a 500 ms budget on every run)
 //
 // TO CHANGE A COST PARAMETER: allocate a NEW version byte, make it the value
@@ -54,7 +58,7 @@ const int kVersionPbkdf2 = 0x01;
 
 /// Envelope version byte: Argon2id key stretching.
 ///
-/// Frozen: m = 16384 (16 MiB), t = 2, p = 1, 32-byte tag. See the table above.
+/// Frozen: m = 32768 (32 MiB), t = 3, p = 1, 32-byte tag. See the table above.
 const int kVersionArgon2id = 0x02;
 
 /// Wire format of a Glyph message.

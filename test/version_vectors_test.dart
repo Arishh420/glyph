@@ -7,7 +7,7 @@ import 'package:glyph/core/glyph_codec.dart';
 ///
 /// The envelope carries the salt and nonce but not the key-derivation cost
 /// parameters, so a version byte is a contract: 0x02 is not "Argon2id", it is
-/// "Argon2id with m=16384, t=2, p=1, 32-byte tag". Nothing in the format
+/// "Argon2id with m=32768, t=3, p=1, 32-byte tag". Nothing in the format
 /// records that, which makes it exactly the sort of thing that gets tuned by
 /// someone with good intentions and breaks every message ever sent.
 ///
@@ -34,18 +34,20 @@ void main() {
       'GLY100005th1msd0LOZbhr9R991297iBZC8RiGyiUlZmicTWGIKbgopsdNA0NBnNFzP'
       'ZxYIZhYX3sUV3eLOgYUzbsScGKt3NZy2Xku96rj6EPJHP8jERStTVoetgu';
 
-  /// Version 0x02: Argon2id, m=16384 (16 MiB), t=2, p=1, 32-byte tag.
+  /// Version 0x02: Argon2id, m=32768 (32 MiB), t=3, p=1, 32-byte tag.
   const argon2idVector =
-      'GLY100005tiABOt0LOZbhr9R991297iBZC8RiGyiUlZmicTWGIohI7A659sGLy8LyGV'
-      'Rz26SgaOQpvnnpJfE0Bg7irtI7kuGHHL04HUB2xulilbwmq4sx2KUp6wK0';
+      'GLY100005tiABOt0LOZbhr9R991297iBZC8RiGyiUlZmicTWGEK9MMH9enMDy49mBmP'
+      'qbhIRYi90mcRoLA3I9dQH4V1995PG6ZsmrpXIM9k907NajzAttNhVWAQ6K';
 
-  test('version 0x01 still means PBKDF2-HMAC-SHA256 at 210,000 iterations',
-      () async {
-    expect(Envelope.parse(pbkdf2Vector).version, kVersionPbkdf2);
-    expect(await codec.decrypt(key: key, armoured: pbkdf2Vector), plaintext);
-  });
+  test(
+    'version 0x01 still means PBKDF2-HMAC-SHA256 at 210,000 iterations',
+    () async {
+      expect(Envelope.parse(pbkdf2Vector).version, kVersionPbkdf2);
+      expect(await codec.decrypt(key: key, armoured: pbkdf2Vector), plaintext);
+    },
+  );
 
-  test('version 0x02 still means Argon2id at m=16384, t=2, p=1', () async {
+  test('version 0x02 still means Argon2id at m=32768, t=3, p=1', () async {
     expect(Envelope.parse(argon2idVector).version, kVersionArgon2id);
     expect(await codec.decrypt(key: key, armoured: argon2idVector), plaintext);
   });
@@ -57,13 +59,18 @@ void main() {
     expect(Envelope.parse(fresh).version, kVersionArgon2id);
   });
 
-  test('both versions decrypt under one key, so old messages keep working',
-      () async {
-    // The point of dispatching on the version byte: a mailbox containing both
-    // formats is readable without the user knowing formats exist.
-    expect(await codec.decrypt(key: key, armoured: pbkdf2Vector), plaintext);
-    expect(await codec.decrypt(key: key, armoured: argon2idVector), plaintext);
-  });
+  test(
+    'both versions decrypt under one key, so old messages keep working',
+    () async {
+      // The point of dispatching on the version byte: a mailbox containing both
+      // formats is readable without the user knowing formats exist.
+      expect(await codec.decrypt(key: key, armoured: pbkdf2Vector), plaintext);
+      expect(
+        await codec.decrypt(key: key, armoured: argon2idVector),
+        plaintext,
+      );
+    },
+  );
 
   test('the vectors are genuinely different messages', () async {
     // Same key, same plaintext, same salt and nonce -- but a different KDF, so

@@ -14,6 +14,7 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:glyph/core/envelope.dart';
+import 'package:glyph/core/glyph_cipher.dart';
 import 'package:glyph/core/key_rules.dart';
 
 /// Fixed, non-random salt and nonce: these are test vectors, not messages.
@@ -29,10 +30,15 @@ Future<String> _vector(int version) async {
   final password = SecretKey(utf8.encode(KeyRules.normalise(_key)));
 
   final KdfAlgorithm kdf = switch (version) {
+    // These must match GlyphCipher's frozen constants. They are duplicated
+    // rather than shared because those constants are private to the cipher,
+    // so `main` below decrypts every vector with the real GlyphCipher as a
+    // self-check: if these drift, the generator fails instead of quietly
+    // emitting a vector that production cannot read.
     kVersionArgon2id => Argon2id(
-        memory: 16 * 1024,
+        memory: 32 * 1024,
         parallelism: 1,
-        iterations: 2,
+        iterations: 3,
         hashLength: 32,
       ),
     kVersionPbkdf2 => Pbkdf2.hmacSha256(iterations: 210000, bits: 256),
@@ -62,9 +68,29 @@ Future<String> _vector(int version) async {
 }
 
 Future<void> main() async {
+  final cipher = GlyphCipher();
+
   print('key       : $_key');
   print('plaintext : $_plaintext');
   print('');
-  print('0x01 PBKDF2   : ${await _vector(kVersionPbkdf2)}');
-  print('0x02 Argon2id : ${await _vector(kVersionArgon2id)}');
+
+  for (final (label, version) in <(String, int)>[
+    ('0x01 PBKDF2  ', kVersionPbkdf2),
+    ('0x02 Argon2id', kVersionArgon2id),
+  ]) {
+    final armoured = await _vector(version);
+
+    // Self-check: the production cipher must be able to read what was just
+    // written. This catches the parameters above drifting from GlyphCipher's.
+    final roundTripped = await cipher.decrypt(key: _key, armoured: armoured);
+    if (roundTripped != _plaintext) {
+      throw StateError('$label vector does not decrypt with GlyphCipher; '
+          'the parameters in this file have drifted');
+    }
+
+    print('$label : $armoured');
+  }
+
+  print('');
+  print('Both vectors verified against GlyphCipher.');
 }

@@ -29,15 +29,15 @@ class GlyphCipher {
   // the top of envelope.dart before touching them, and allocate a new version
   // byte instead.
 
-  /// Argon2id memory, in 1 KiB blocks. 16384 blocks = 16 MiB.
+  /// Argon2id memory, in 1 KiB blocks. 32768 blocks = 32 MiB.
   ///
   /// The unit is the standard Argon2 `m` parameter: cryptography 2.9.0
   /// documents it as the "number of 1 kB blocks" and allocates
   /// `1024 * blockCount` bytes for it.
-  static const int _argonMemoryBlocks = 16 * 1024;
+  static const int _argonMemoryBlocks = 32 * 1024;
 
   /// Argon2id passes over memory (`t`).
-  static const int _argonIterations = 2;
+  static const int _argonIterations = 3;
 
   /// Argon2id lanes (`p`). One, so derivation is deterministic and single
   /// threaded; the work already happens off the UI thread in a worker isolate.

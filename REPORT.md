@@ -12,7 +12,7 @@ A working Android app, 117 automated tests, zero analyzer issues.
 | Step | Command | Result |
 |---|---|---|
 | Static analysis | `flutter analyze` | **No issues found** (with four lints added on top of `flutter_lints`) |
-| Tests | `flutter test` | **117 passed**, ~7 s (five consecutive clean runs) |
+| Tests | `flutter test` | **117 passed**, ~17 s (five consecutive clean runs) |
 | Debug build | `flutter build apk --debug` | **Built**, 7–15 s warm (Gradle and NDK already warm) |
 | On device | `flutter run -d emulator-5554` | **Launches**, renders correctly inside `SafeArea` |
 
@@ -76,6 +76,10 @@ Argon2id m=16 MiB t=2 p=1  :  77 ms
 PBKDF2-HMAC-SHA256 210,000 : 759 ms
 ```
 
+(Host machine, and at the parameters then under consideration. The shipped
+Argon2id cost is higher — see the frozen parameters below — but the ordering
+against PBKDF2 is what mattered for choosing the primitive.)
+
 Argon2id is both the stronger primitive and about ten times faster here, so it
 is the default. I had expected the opposite — the package's own Argon2 test
 allows ten seconds for a 1 MiB derivation, which suggested the pure-Dart
@@ -132,7 +136,11 @@ table appears at the top of `lib/core/envelope.dart`.
 | Byte | KDF | Frozen parameters |
 |---|---|---|
 | `0x01` | PBKDF2-HMAC-SHA256 | iterations 210,000; derived length 32 bytes |
-| `0x02` | Argon2id, RFC 9106 (version 0x13) | **m = 16384, t = 2, p = 1**, tag 32 bytes |
+| `0x02` | Argon2id, RFC 9106 (version 0x13) | **m = 32768, t = 3, p = 1**, tag 32 bytes |
+
+`0x02` was redefined once before release — it briefly meant m = 16384, t = 2 —
+and that was legal only because no message in that format existed outside this
+repository. **Any cost change from here on requires a new version byte.**
 
 Both versions share the rest of the format: AES-256-GCM, the 16-byte salt and
 12-byte nonce taken from the envelope, a 16-byte tag, and the version byte
@@ -159,8 +167,8 @@ name `memory` is ambiguous between blocks, KiB and bytes:
   `malloc.allocate(1024 * blockCount)`, and a block is `Uint32List(256)`.
   1024 bytes per block.
 
-So `memory` is the standard Argon2 `m` in KiB: **m = 16384 is 16 MiB**, and the
-constant in the code is written `16 * 1024` to make that obvious.
+So `memory` is the standard Argon2 `m` in KiB: **m = 32768 is 32 MiB**, and the
+constant in the code is written `32 * 1024` to make that obvious.
 
 #### Choosing the parameters: measured, not guessed
 
@@ -170,14 +178,13 @@ production does:
 
 | Parameters | min | **median** | max | Within a 500 ms budget? |
 |---|---|---|---|---|
-| m=16384 (16 MiB), t=2, p=1 | 89 ms | **101 ms** | 181 ms | yes — **adopted** |
-| m=32768 (32 MiB), t=3, p=1 | 263 ms | **297 ms** | 363 ms | yes |
+| m=16384 (16 MiB), t=2, p=1 | 89 ms | **101 ms** | 181 ms | yes — superseded |
+| m=32768 (32 MiB), t=3, p=1 | 263 ms | **297 ms** | 363 ms | yes — **adopted** |
 | m=65536 (64 MiB), t=3, p=1 | 544 ms | **571 ms** | 697 ms | **no** |
 
 **64 MiB / t=3 was evaluated and rejected: it exceeded 500 ms on every one of
 the five runs**, fastest included, so it is not a borderline miss. 32 MiB / t=3
-does fit the budget comfortably and remains available if the cost ceiling is
-ever revisited — it would need a new version byte.
+fits the budget with room to spare and is what `0x02` now means.
 
 Two caveats on those numbers, both of which cut in favour of stronger
 parameters later rather than now:
@@ -197,10 +204,17 @@ under each version byte's frozen parameters (by
 `dart run tool/make_test_vectors.dart`) and decrypts them against a hard-coded
 key and plaintext. Changing a cost parameter breaks those tests immediately.
 
-I verified the guard actually fires rather than trusting it: temporarily
-raising Argon2id memory from 16 MiB to 32 MiB failed the `0x02` vector test
-while the `0x01` vector test kept passing, which is exactly the expected
-signal. The parameter was then restored.
+I verified the guard actually fires rather than trusting it, once per frozen
+Argon2id parameter:
+
+| Negative control | Result |
+|---|---|
+| memory 32 MiB → 64 MiB | `0x02` vector test **failed**, `0x01` kept passing |
+| iterations 3 → 2 | `0x02` vector test **failed**, `0x01` kept passing |
+
+Both are the expected signal: a changed Argon2id cost breaks only the Argon2id
+vector, and leaves the PBKDF2 one alone. The parameters were restored after
+each control and the full suite re-run green.
 
 This also closed a real gap. Before these vectors, **nothing decrypted a
 genuine version-`0x01` message end to end** — `test/envelope_test.dart` only
@@ -216,16 +230,25 @@ rejected.
 Debug build, JIT, `emulator-5554`. Timings were taken with temporary
 instrumentation that has since been removed.
 
-| Operation | Milliseconds |
+**These end-to-end figures were measured under the superseded `0x02`
+parameters (m=16384, t=2) and have not been re-measured on device since the
+change to m=32768, t=3:**
+
+| Operation | Milliseconds (at the superseded m=16384, t=2) |
 |---|---|
 | Encrypt, 20-character input | **205, 242, 285** typical; one 650 outlier |
 | Decrypt, cold (derives the key) | 307 |
 | Decrypt, same message again (cache hit) | **1, 1, 2, 14, 14** |
 
-So roughly **a fifth of a second** per operation, dominated entirely by
-Argon2id. Re-decrypting a message already seen is effectively instant: 1 ms
-against a ~100 ms floor for a fresh derivation is only possible on a cache
-hit.
+Derivation alone went from a 101 ms median to a 297 ms median, so expect
+roughly **0.45 s** per uncached operation now rather than 0.25 s. That is an
+estimate by addition, not a measurement — the figure actually measured is the
+297 ms derivation median. Corroborating evidence: the full test suite, which
+derives keys constantly, went from about 7 s to about 17 s. **Re-measure
+end-to-end on device before pass two quotes a number to users.**
+
+A cached decrypt is unaffected and still effectively instant: 1 ms against a
+~300 ms floor for a fresh derivation is only possible on a cache hit.
 
 That the cache is responsible is asserted structurally rather than by the
 clock. `test/glyph_cipher_cache_test.dart` counts entries — a second decrypt
