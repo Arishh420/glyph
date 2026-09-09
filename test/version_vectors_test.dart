@@ -52,11 +52,21 @@ void main() {
     expect(await codec.decrypt(key: key, armoured: argon2idVector), plaintext);
   });
 
-  test('this build writes version 0x02', () async {
-    // Guards against the default drifting without the vectors being updated.
-    expect(GlyphCipher.currentVersion, kVersionArgon2id);
+  test('this build writes version 0x01, the shipping default', () async {
+    // PBKDF2 is the shipping default: one format on every platform, because
+    // Argon2id has no Web Crypto equivalent and costs ~2 s in a browser.
+    expect(GlyphCipher.currentVersion, kVersionPbkdf2);
     final fresh = await codec.encrypt(key: key, plaintext: plaintext);
-    expect(Envelope.parse(fresh).version, kVersionArgon2id);
+    expect(Envelope.parse(fresh).version, kVersionPbkdf2);
+  });
+
+  test('nothing this build writes is version 0x02 any more', () async {
+    // 0x02 is legacy-readable, never written. Several messages, since the
+    // version byte is not randomised but this guards a careless default.
+    for (var i = 0; i < 3; i++) {
+      final fresh = await codec.encrypt(key: key, plaintext: 'message $i');
+      expect(Envelope.parse(fresh).version, isNot(kVersionArgon2id));
+    }
   });
 
   test(

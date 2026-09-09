@@ -16,14 +16,34 @@ import 'glyph_errors.dart';
 // typed the wrong key. Silent, permanent, and impossible to diagnose from the
 // message alone.
 //
-// | Byte | KDF                       | Frozen parameters                     |
-// |------|---------------------------|---------------------------------------|
-// | 0x01 | PBKDF2-HMAC-SHA256        | iterations 210000, dkLen 32 bytes     |
-// | 0x02 | Argon2id, RFC 9106 v0x13  | m = 32768, t = 3, p = 1, tag 32 bytes |
+// | Byte | KDF                      | Frozen parameters                    | Status          |
+// |------|--------------------------|--------------------------------------|-----------------|
+// | 0x01 | PBKDF2-HMAC-SHA256       | iterations 210000, dkLen 32 bytes    | SHIPPING DEFAULT|
+// | 0x02 | Argon2id, RFC 9106 v0x13 | m = 32768, t = 3, p = 1, tag 32 bytes| legacy-readable |
 //
-// 0x02 was redefined once before release (it briefly meant m = 16384, t = 2);
-// that was legal only because no message in that format existed outside this
-// repository, and any cost change from here on requires a new version byte.
+// Changing a cost parameter in either row requires a NEW version byte. Not an
+// edit to these numbers -- see the bottom of this comment.
+//
+// 0x01 is what this build writes, and every new message is 0x01. That is a
+// choice about portability, not about cost. Argon2id is the stronger
+// primitive and is roughly three times cheaper on native, but it has no Web
+// Crypto equivalent: in a browser it is about 2 s of compiled JavaScript on
+// the main thread, and dart:isolate does not exist there to move it off.
+// PBKDF2 reaches Web Crypto and costs about 18 ms. Measured medians:
+//
+//                        Android AOT (worker isolate)   Chrome release (main thread)
+//   0x01 PBKDF2 210k     892 ms                         18 ms
+//   0x02 Argon2id        331 ms                          2028 ms
+//
+// Per-platform KDFs were the obvious alternative and were rejected: they put
+// the slow path on exactly the cross-platform exchange a web build exists to
+// serve. One format everywhere is worth 0.9 s on a phone.
+//
+// 0x02 stays readable forever, with its parameters and its golden vector
+// intact, so anything already encrypted with it keeps opening. It was also
+// redefined once before release (it briefly meant m = 16384, t = 2); that was
+// legal only because no message in that format existed outside this
+// repository, and that window is now closed.
 //
 // Argon2id `m` is the standard memory parameter in 1 KiB blocks, so
 // m = 32768 is 32 MiB. That unit is confirmed in cryptography 2.9.0: the
@@ -37,11 +57,11 @@ import 'glyph_errors.dart';
 // itself passed as associated data so it cannot be swapped for a weaker one.
 // Argon2id is used with no optional secret and no associated data.
 //
-// These parameters were chosen by measurement, not taste. On emulator-5554
+// 0x02's parameters were chosen by measurement, not taste. On emulator-5554
 // (Android 16, arm64, debug/JIT), median of five derivations each:
 //
 //   m=16384 t=2  ->  101 ms   (pre-release value of 0x02, superseded)
-//   m=32768 t=3  ->  297 ms   (chosen)
+//   m=32768 t=3  ->  297 ms   (what 0x02 means)
 //   m=65536 t=3  ->  571 ms   (rejected: over a 500 ms budget on every run)
 //
 // TO CHANGE A COST PARAMETER: allocate a NEW version byte, make it the value
@@ -53,10 +73,14 @@ import 'glyph_errors.dart';
 
 /// Envelope version byte: PBKDF2-HMAC-SHA256 key stretching.
 ///
+/// **The shipping default.** Every message this build writes is 0x01.
+///
 /// Frozen: 210,000 iterations, 32-byte output. See the table above.
 const int kVersionPbkdf2 = 0x01;
 
 /// Envelope version byte: Argon2id key stretching.
+///
+/// **Legacy-readable.** No longer written, decrypted forever.
 ///
 /// Frozen: m = 32768 (32 MiB), t = 3, p = 1, 32-byte tag. See the table above.
 const int kVersionArgon2id = 0x02;

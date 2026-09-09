@@ -63,12 +63,21 @@ void main() {
     expect(cipher.cacheSize, 1);
   });
 
-  test('the cache is capped so a long backlog cannot grow it without limit',
-      () async {
-    // 40 distinct messages, so 40 distinct salts, against a cap of 32.
-    for (var i = 0; i < 40; i++) {
-      await cipher.encrypt(key: keyA, plaintext: 'message $i');
-    }
-    expect(cipher.cacheSize, lessThanOrEqualTo(32));
-  });
+  test(
+    'the cache is capped so a long backlog cannot grow it without limit',
+    () async {
+      // 33 distinct messages, so 33 distinct salts, against a cap of 32: the
+      // smallest number that forces exactly one eviction. Kept minimal
+      // because the shipping KDF is PBKDF2 at 210,000 iterations, which makes
+      // this by far the most expensive test in the suite -- around 25 s of
+      // real key stretching, hence the explicit timeout. It used to do 40
+      // derivations, which fitted inside the default 30 s only while Argon2id
+      // was the default.
+      for (var i = 0; i < 33; i++) {
+        await cipher.encrypt(key: keyA, plaintext: 'message $i');
+      }
+      expect(cipher.cacheSize, 32);
+    },
+    timeout: const Timeout(Duration(minutes: 3)),
+  );
 }

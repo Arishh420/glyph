@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'core/glyph_codec.dart';
-import 'core/glyph_worker.dart';
+import 'core/glyph_codec_factory.dart';
 import 'data/key_store.dart';
 import 'ui/glyph_page.dart';
 import 'ui/theme.dart';
@@ -9,7 +9,8 @@ import 'ui/theme.dart';
 void main() {
   runApp(
     GlyphApp(
-      codec: IsolateGlyphCodec(),
+      // Worker isolate on native, inline on web, where isolates do not exist.
+      codec: createGlyphCodec(),
       keyStore: SecureKeyStore(),
     ),
   );

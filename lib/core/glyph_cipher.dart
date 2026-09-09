@@ -18,13 +18,22 @@ import 'key_rules.dart';
 class GlyphCipher {
   GlyphCipher();
 
-  /// Version byte written by this build. Argon2id is both stronger and, in
-  /// this package's pure-Dart implementations, several times faster than
-  /// PBKDF2 at comparable cost, so it is the default.
-  static const int currentVersion = kVersionArgon2id;
+  /// Version byte written by this build: PBKDF2-HMAC-SHA256.
+  ///
+  /// Chosen for one format on every platform rather than for raw cost.
+  /// Argon2id is the stronger primitive and is cheaper on native, but it has
+  /// no Web Crypto equivalent, so in a browser it costs about 2 s of compiled
+  /// JavaScript on the main thread with no isolate available to move it to.
+  /// PBKDF2 reaches Web Crypto and lands at about 18 ms there. Splitting the
+  /// KDF per platform would have put the slow path on exactly the
+  /// cross-platform exchange the web target exists to serve.
+  ///
+  /// Argon2id remains fully readable as version 0x02, forever. See the
+  /// version-byte contract at the top of envelope.dart.
+  static const int currentVersion = kVersionPbkdf2;
 
-  // The constants below are the frozen meaning of version byte 0x02. They are
-  // not tuning knobs: the envelope does not record them, so changing one
+  // The constants below are the frozen meaning of their version bytes. They
+  // are not tuning knobs: the envelope does not record them, so changing one
   // orphans every message already written. See the version-byte contract at
   // the top of envelope.dart before touching them, and allocate a new version
   // byte instead.
@@ -40,11 +49,12 @@ class GlyphCipher {
   static const int _argonIterations = 3;
 
   /// Argon2id lanes (`p`). One, so derivation is deterministic and single
-  /// threaded; the work already happens off the UI thread in a worker isolate.
+  /// threaded; on native the work already happens off the UI thread in a
+  /// worker isolate.
   static const int _argonParallelism = 1;
 
-  /// PBKDF2 iteration count. Frozen meaning of version byte 0x01, kept only
-  /// so messages in that format stay readable.
+  /// PBKDF2 iteration count. Frozen meaning of version byte 0x01, which is
+  /// what this build writes.
   static const int _pbkdf2Iterations = 210000;
 
   /// Derived key length in bytes, for both KDFs: AES-256 needs 32.
