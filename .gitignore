@@ -46,3 +46,15 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Release signing — never commit these.
+#
+# android/.gitignore already covers key.properties and *.jks/*.keystore for
+# anything under android/, but not for the repository root, so these repeat the
+# patterns unanchored. Losing the keystore means no future version of Glyph can
+# ever update an installed copy; leaking it means anyone can publish an update
+# that Android will accept as genuine.
+android/key.properties
+key.properties
+*.jks
+*.keystore
