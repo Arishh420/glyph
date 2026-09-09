@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 
 import 'core/glyph_codec.dart';
 import 'core/glyph_codec_factory.dart';
+import 'core/secure_context.dart';
 import 'data/key_store.dart';
+import 'data/key_store_factory.dart';
 import 'ui/glyph_page.dart';
+import 'ui/insecure_context_page.dart';
 import 'ui/theme.dart';
 
 void main() {
@@ -11,7 +14,9 @@ void main() {
     GlyphApp(
       // Worker isolate on native, inline on web, where isolates do not exist.
       codec: createGlyphCodec(),
-      keyStore: SecureKeyStore(),
+      // Platform keychain on native; memory only on web, where every
+      // persistence mechanism is readable by any script on the page.
+      keyStore: createKeyStore(),
     ),
   );
 }
@@ -38,7 +43,11 @@ class GlyphApp extends StatelessWidget {
       theme: GlyphTheme.light,
       darkTheme: GlyphTheme.dark,
       themeMode: ThemeMode.system,
-      home: GlyphPage(codec: codec, keyStore: keyStore),
+      // A browser that withholds Web Crypto gets an explanation instead of a
+      // silently slower, less-tested code path. Always true off the web.
+      home: isCryptoContextSecure
+          ? GlyphPage(codec: codec, keyStore: keyStore)
+          : const InsecureContextPage(),
     );
   }
 }

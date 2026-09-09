@@ -1,10 +1,14 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-
 /// Persistence for the one shared key.
 ///
-/// An interface so that widget tests can supply an in-memory implementation:
-/// [SecureKeyStore] talks to platform channels, which are not available in a
-/// plain widget test.
+/// An interface for two reasons: the platform factory in
+/// `key_store_factory.dart` picks an implementation per target, and widget
+/// tests supply an in-memory one because the secure store talks to platform
+/// channels that a plain widget test has no way to answer.
+///
+/// This file deliberately imports nothing. `flutter_secure_storage` lives in
+/// `secure_key_store.dart` instead, so that a web build -- which must never
+/// reach that package's endorsed web implementation, a thin wrapper over
+/// localStorage -- does not pull it in through this interface.
 abstract interface class KeyStore {
   /// The stored key, or null if none has been saved.
   Future<String?> read();
@@ -16,45 +20,14 @@ abstract interface class KeyStore {
   Future<void> delete();
 }
 
-/// Keychain on Apple platforms, KeyStore-backed encrypted preferences on
-/// Android.
-class SecureKeyStore implements KeyStore {
-  SecureKeyStore({FlutterSecureStorage? storage})
-      : _storage = storage ??
-            const FlutterSecureStorage(
-              // The default Android options encrypt values with AES-GCM under
-              // a key wrapped by RSA-OAEP in the Android KeyStore. This
-              // replaces the Jetpack EncryptedSharedPreferences path that
-              // earlier versions of the plugin used, which upstream removed
-              // after Google deprecated it.
-              aOptions: AndroidOptions(),
-              // `first_unlock` rather than the default `unlocked`: the key
-              // must be readable when the app is relaunched in the background
-              // after a reboot, but never before the device is first unlocked.
-              iOptions: IOSOptions(
-                accessibility: KeychainAccessibility.first_unlock,
-              ),
-              mOptions: MacOsOptions(
-                accessibility: KeychainAccessibility.first_unlock,
-              ),
-            );
-
-  final FlutterSecureStorage _storage;
-
-  /// Storage slot for the shared key.
-  static const String _slot = 'glyph.shared_key.v1';
-
-  @override
-  Future<String?> read() => _storage.read(key: _slot);
-
-  @override
-  Future<void> write(String key) => _storage.write(key: _slot, value: key);
-
-  @override
-  Future<void> delete() => _storage.delete(key: _slot);
-}
-
-/// A [KeyStore] that keeps the key in memory only. Used by widget tests.
+/// A [KeyStore] that keeps the key in memory only.
+///
+/// Used by widget tests, and -- deliberately -- by the web build. On web there
+/// is no store worth writing to: every browser mechanism available
+/// (localStorage, sessionStorage, IndexedDB) is readable by any script that
+/// reaches the page, so a key written to one is a key handed to whoever
+/// compromises the site. In a browser the key lives for the life of the tab and
+/// is gone on refresh, and the interface says so out loud.
 class InMemoryKeyStore implements KeyStore {
   InMemoryKeyStore([this._value]);
 

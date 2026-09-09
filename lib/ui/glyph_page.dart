@@ -9,6 +9,7 @@ import '../core/glyph_codec.dart';
 import '../core/glyph_errors.dart';
 import '../core/key_rules.dart';
 import '../data/key_store.dart';
+import '../data/key_store_factory.dart';
 import 'labelled_box.dart';
 import 'theme.dart';
 
@@ -387,6 +388,7 @@ class _GlyphPageState extends State<GlyphPage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 _buildKeyBox(scheme),
+                if (!kKeyStorePersists) _buildNoPersistenceNotice(scheme),
                 const SizedBox(height: 18),
                 Expanded(child: _buildOutputBox(scheme)),
                 const SizedBox(height: 18),
@@ -397,6 +399,39 @@ class _GlyphPageState extends State<GlyphPage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Permanent, non-dismissable line shown only where the key cannot be saved.
+  ///
+  /// That is the web build, and it is the one difference in behaviour a friend
+  /// will actually trip over: they type a key, refresh, and it is gone. Saying
+  /// so once, always, in the interface is cheaper than the confusion. Driven by
+  /// [kKeyStorePersists] rather than a `kIsWeb` check, so it stays true to what
+  /// the key store actually does rather than to a guess about the platform.
+  Widget _buildNoPersistenceNotice(ColorScheme scheme) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(
+            Icons.info_outline,
+            size: 15,
+            color: scheme.onSurfaceVariant.withValues(alpha: 0.75),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              "Key is not saved in the browser — you'll need to re-enter it "
+              'after a refresh.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant.withValues(alpha: 0.75),
+                  ),
+            ),
+          ),
+        ],
       ),
     );
   }
