@@ -279,8 +279,15 @@ void main() {
       expect(find.bySemanticsLabel('Key is valid'), findsOneWidget);
     });
 
-    testWidgets('the short-key hint appears once, then latches off',
+    testWidgets('the short-key hint tracks the current key',
         (tester) async {
+      // This test used to assert the opposite -- that the hint latched off
+      // permanently the first time the key grew past eight. That was a
+      // misreading of "do not nag": not nagging means no animation, no
+      // repetition and nothing to dismiss, not showing once and never again.
+      // The latch also tripped during startup on any build that restores a
+      // saved key, so a short key typed afterwards produced no hint at all.
+      // test/short_key_hint_test.dart covers the boundaries in detail.
       await pumpGlyph(tester);
       const hint = 'Short key — fine for casual use.';
 
@@ -288,15 +295,13 @@ void main() {
       await tester.pump();
       expect(find.text(hint), findsOneWidget);
 
-      // Growing past the threshold spends the hint...
       await tester.enterText(find.byKey(GlyphKeys.keyField), 'abcdefghij');
       await tester.pump();
       expect(find.text(hint), findsNothing);
 
-      // ...and it does not come back to nag.
       await tester.enterText(find.byKey(GlyphKeys.keyField), 'abcd');
       await tester.pump();
-      expect(find.text(hint), findsNothing);
+      expect(find.text(hint), findsOneWidget);
     });
 
     testWidgets('forgetting the key clears the field and the cache',

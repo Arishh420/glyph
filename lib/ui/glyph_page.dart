@@ -73,10 +73,6 @@ class _GlyphPageState extends State<GlyphPage> {
   Timer? _outputCopyTimer;
   Timer? _keyCopyTimer;
 
-  /// The short-key hint is shown once and then latched off, so it informs
-  /// without turning into a recurring scold.
-  bool _shortHintSpent = false;
-
   /// Last key written to storage, to avoid rewriting on every keystroke.
   String? _savedKey;
 
@@ -153,11 +149,6 @@ class _GlyphPageState extends State<GlyphPage> {
   // ---------------------------------------------------------------- reactions
 
   void _onKeyChanged() {
-    // Latch the short-key hint off once the key has grown past the threshold,
-    // so it informs once rather than reappearing on every later edit.
-    if (KeyRules.isValid(_key.text) && !KeyRules.isShort(_key.text)) {
-      _shortHintSpent = true;
-    }
     final normalised = KeyRules.normalise(_key.text);
     if (normalised != _savedKey) {
       // A different key invalidates every cached derived key.
@@ -459,7 +450,15 @@ class _GlyphPageState extends State<GlyphPage> {
 
   Widget _buildKeyBox(ColorScheme scheme) {
     final hasKey = _key.text.isNotEmpty;
-    final showShortHint = KeyRules.isShort(_key.text) && !_shortHintSpent;
+    // Purely a function of the current key: shown whenever the key is usable
+    // but under eight graphemes, gone the moment it reaches eight or is
+    // cleared. It was previously latched off after the first time the key grew
+    // past the threshold, which looked like a "don't nag" rule but meant the
+    // hint could never be seen again for the rest of the session -- and on a
+    // build that restores a saved key, the latch tripped during startup,
+    // before the user had typed anything at all. Not nagging means no
+    // animation, no repetition and nothing to dismiss, not showing once.
+    final showShortHint = KeyRules.isShort(_key.text);
 
     return LabelledBox(
       label: 'KEY',
