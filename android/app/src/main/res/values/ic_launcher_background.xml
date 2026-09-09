@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Kept in step with _background in tool/make_icons.dart, which is the
+         theme seed from lib/ui/theme.dart darkened for contrast. -->
+    <color name="ic_launcher_background">#2F3E50</color>
+</resources>
