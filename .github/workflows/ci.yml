@@ -1,0 +1,102 @@
+name: CI
+
+# ---------------------------------------------------------------------------
+# Checks only. This workflow never builds a release artifact, never touches a
+# keystore, and is never given a secret. It is also the `checks` job of
+# android-test.yml, via workflow_call, so the two can never drift apart.
+#
+# `pull_request`, deliberately never `pull_request_target`: pull_request_target
+# runs the BASE repository's workflow with a writable token in the context of a
+# fork's pull request, which is how a fork gets to read a repository secret.
+# There is no secret here to steal, and there is not going to be one.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches-ignore:
+      # main is covered by android-test.yml, which calls this workflow as its
+      # first job. Running both would double every push to main.
+      - main
+      # gh-pages holds the deployed web build -- main.dart.js and friends, no
+      # pubspec.yaml. Every check here would fail on it at `pub get`.
+      - gh-pages
+  pull_request:
+  workflow_call:
+
+# No job gets anything it did not ask for.
+permissions: {}
+
+jobs:
+  checks:
+    name: Analyze, test, audit
+    # Pinned rather than ubuntu-latest: `latest` moves to a new image without
+    # warning, and this job depends on the image's Chrome and its Android SDK.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # The history audit at the end of this job greps every commit on every
+          # ref. A shallow clone would let a keystore committed and reverted
+          # long ago pass unnoticed.
+          fetch-depth: 0
+
+      - name: Set up Flutter
+        uses: ./.github/actions/setup-flutter
+
+      - name: Install dependencies
+        # --enforce-lockfile: resolve to exactly what pubspec.lock records, and
+        # fail rather than silently picking a newer package.
+        run: flutter pub get --enforce-lockfile
+
+      # There is deliberately no `dart format --set-exit-if-changed` step.
+      # The repository does not currently pass it -- 20 of 39 files would be
+      # rewritten -- and reformatting the codebase is not this workflow's job.
+      # Adding the step would mean either a permanently red CI or a diff that
+      # touches almost everything. Reformat first, then add the step.
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test on the Dart VM
+        # Runs every test including the vm-only ones. Expected: 137.
+        run: flutter test
+
+      - name: Locate Chrome
+        # ubuntu-24.04 ships Google Chrome preinstalled. Resolve it explicitly
+        # and fail with a legible message if that ever stops being true, rather
+        # than letting `flutter test --platform chrome` fail somewhere deeper.
+        run: |
+          set -euo pipefail
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          if [ -z "$chrome" ]; then
+            echo "::error::No Google Chrome on PATH. The ubuntu-24.04 image is expected to ship one; if that has changed, install Chrome in this job before the browser test step."
+            exit 1
+          fi
+          echo "CHROME_EXECUTABLE=$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version
+
+      - name: Test in real Chrome
+        # Everything except the tests tagged vm-only in dart_test.yaml -- the
+        # ones that assert the native branch of a conditional export or drive
+        # dart:isolate, neither of which can hold in a browser. Expected: 127.
+        run: flutter test --platform chrome --exclude-tags vm-only
+
+      - name: Audit history for a committed keystore
+        # A signing key that ever touched a commit is compromised for good, and
+        # deleting it in a later commit does not help: the blob stays reachable.
+        # --all --full-history so no ref and no rewritten branch is skipped.
+        run: |
+          set -euo pipefail
+          hits="$(git log --all --full-history --format=%H -- \
+            '*.jks' '*.keystore' 'android/key.properties' 'key.properties')"
+          if [ -n "$hits" ]; then
+            echo "::error::A keystore or key.properties appears in this repository's history. Treat the signing key as compromised."
+            echo "Commits touching those paths:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "Clean: no commit touches *.jks, *.keystore or key.properties."

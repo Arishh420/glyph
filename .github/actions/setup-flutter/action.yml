@@ -1,0 +1,87 @@
+name: Set up Flutter
+description: >-
+  Install the exact Flutter SDK Glyph is built with, by shallow git clone rather
+  than a third-party action, and refuse to continue if the versions do not match.
+
+# ---------------------------------------------------------------------------
+# WHY A GIT CLONE AND NOT A SETUP ACTION
+#
+# A third-party Flutter setup action is a supply-chain dependency that runs with
+# the job's token in a repository whose whole point is that it handles a
+# cryptographic key. Cloning the SDK from flutter/flutter needs no third party:
+# the tag is a name Google controls, and nothing here executes code from anyone
+# else.
+#
+# WHY THE VERSION IS ASSERTED RATHER THAN TRUSTED
+#
+# `--branch 3.47.2` pins the framework, but the Dart SDK is downloaded by the
+# tool on first run and is not itself pinned by the tag. Glyph's pubspec
+# requires `sdk: ^3.13.2`, and a silently different Dart would change what
+# `flutter analyze` accepts. Both numbers are therefore checked, not assumed.
+# ---------------------------------------------------------------------------
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the pinned Flutter SDK from cache
+      id: flutter-cache
+      # actions/cache v6. Pinned to a full commit SHA, which also freezes the
+      # action's Node runtime -- v4 (0057852) is still `using: node20`, and
+      # GitHub removes Node 20 from the runners on 2026-09-23. v6 is node24.
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ runner.temp }}/flutter
+        # The key names the tag AND the commit it resolved to, so it is
+        # immutable: written once, restored unchanged forever after. It covers
+        # bin/cache too, which is where the Dart SDK and the web artifacts land,
+        # so only the very first run pays for those.
+        key: flutter-sdk-${{ runner.os }}-${{ runner.arch }}-3.47.2-d3b14c876900e553bc736ca19295fc09e3853e8e
+
+    - name: Clone the Flutter SDK
+      if: steps.flutter-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        git clone --depth 1 --branch 3.47.2 \
+          https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+
+    - name: Put Flutter on PATH
+      shell: bash
+      run: echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+    - name: Warm up the Flutter tool
+      shell: bash
+      # Deliberately a separate step from the version gate below. On a cache
+      # miss this is the invocation that builds the tool snapshot and downloads
+      # the Dart SDK, and it writes progress to stdout. Doing it here means the
+      # `--version --machine` call that follows emits JSON and nothing else, so
+      # jq is never handed a stream with download chatter glued to the front of
+      # it. Failing here also gives a clearer error than a jq parse failure.
+      run: flutter --version
+
+    - name: Verify the pinned Flutter and Dart versions
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        expected_flutter='3.47.2'
+        expected_dart='3.13.2'
+
+        flutter --version --machine > "$RUNNER_TEMP/flutter-version.json"
+
+        actual_flutter="$(jq -r '.frameworkVersion' "$RUNNER_TEMP/flutter-version.json")"
+        actual_dart="$(jq -r '.dartSdkVersion' "$RUNNER_TEMP/flutter-version.json")"
+
+        echo "Flutter: $actual_flutter (expected $expected_flutter)"
+        echo "Dart:    $actual_dart (expected $expected_dart)"
+
+        failed=0
+        if [ "$actual_flutter" != "$expected_flutter" ]; then
+          echo "::error::Flutter is $actual_flutter, expected $expected_flutter."
+          failed=1
+        fi
+        if [ "$actual_dart" != "$expected_dart" ]; then
+          echo "::error::Dart is $actual_dart, expected $expected_dart."
+          failed=1
+        fi
+        exit "$failed"

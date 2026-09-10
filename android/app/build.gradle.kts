@@ -138,6 +138,32 @@ val releaseSigningFailure: String? = run {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test channel.
+//
+// CI publishes a rolling test APK that has to install *alongside* the real
+// Glyph on the same phone, which means a different application ID and a
+// different launcher label. Everything else -- the cipher, the envelope, the
+// version bytes -- is identical; this is the same app with a different name on
+// the box.
+//
+// Read through providers.gradleProperty() rather than project.property() or
+// the `project.hasProperty` idiom: the provider registers the property as a
+// tracked build-configuration input, so the configuration cache is correctly
+// invalidated when it changes, and nothing reaches into `project` at execution
+// time. It resolves both spellings:
+//
+//   ./gradlew ... -PglyphChannel=test
+//   ORG_GRADLE_PROJECT_glyphChannel=test flutter build apk --release
+//
+// The second is the one CI uses, because `flutter build` owns the Gradle
+// command line and there is no supported way to add -P to it.
+//
+// Absent, empty, or any value other than "test" means the ordinary build. A
+// typo therefore produces a normal Glyph, never a half-renamed one.
+// ---------------------------------------------------------------------------
+val isTestChannel: Boolean = providers.gradleProperty("glyphChannel").orNull == "test"
+
 android {
     namespace = "com.glyphpad.glyph"
     // Pinned deliberately: never let a plugin bump these. A changed NDK version
@@ -169,6 +195,19 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // Test channel only. The suffix applies to the application ID, not to
+        // `namespace`, so the R class and the relative ".MainActivity" in the
+        // manifest still resolve against com.glyphpad.glyph.
+        if (isTestChannel) {
+            applicationIdSuffix = ".test"
+        }
+
+        // Consumed by android:label in AndroidManifest.xml. Always set, in both
+        // channels: an unset placeholder is a manifest-merger failure, not a
+        // default, so there is no way to end up with a literal "${appLabel}" on
+        // the home screen.
+        manifestPlaceholders["appLabel"] = if (isTestChannel) "Glyph (test)" else "Glyph"
     }
 
     // Declared before buildTypes: the release build type looks this config up by

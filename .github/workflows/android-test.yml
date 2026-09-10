@@ -1,0 +1,426 @@
+name: Android test build
+
+# ---------------------------------------------------------------------------
+# A rolling, separately-signed TEST APK.
+#
+# This is not the friend release. Real releases are built locally and by hand,
+# signed with the real release key, which never leaves the owner's machine and
+# is never available to this workflow. What this produces is signed with a
+# different key entirely, carries the application ID com.glyphpad.glyph.test
+# and the label "Glyph (test)", and therefore installs alongside the real Glyph
+# rather than replacing it.
+#
+# Everything lands on one release, tagged `android-test`, which is deleted and
+# recreated on every run so the owner has a single page to bookmark.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+  workflow_dispatch:
+
+concurrency:
+  group: android-test
+  # Never cancel. A cancelled run can land between "delete the old release" and
+  # "create the new one", leaving the bookmarked page pointing at nothing.
+  # Queueing costs a few minutes; cancelling costs the download link.
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  # Nothing is built and nothing is published unless this passes.
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-and-publish:
+    name: Build and publish the test APK
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      # Needed to delete and recreate the `android-test` release and its tag.
+      contents: write
+
+    env:
+      # The release certificate of the real, hand-built Glyph. The test APK must
+      # never be signed with this. Public information -- it is in README.md.
+      RELEASE_CERT_SHA256: a7a30aa6024572baabd366673893d192fc65a8e6e4baa4d6624a23c5fb94a316
+      TEST_APPLICATION_ID: com.glyphpad.glyph.test
+      TEST_APP_LABEL: Glyph (test)
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          # 25 to match the JDK the owner's machine builds with (Android
+          # Studio's bundled JBR 25.0.2). AGP still targets Java 17 bytecode;
+          # this is the JVM Gradle itself runs on.
+          java-version: '25'
+
+      - name: Report the JDK the runner actually got
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          "$JAVA_HOME/bin/javac" -version
+
+      - name: Set up Flutter
+        uses: ./.github/actions/setup-flutter
+
+      - name: Install dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Ensure the Android SDK packages this build pins
+        # The package IDs below were read off the owner's own SDK via
+        # `sdkmanager --list_installed`, not guessed. `platforms;android-37.0`
+        # is the one to watch: the ".0" is part of Android's newer minor-SDK
+        # naming and is unusual enough to be worth seeing confirmed. The
+        # listing below runs BEFORE the install for exactly that reason -- if
+        # an ID is wrong, the log shows what the runner really has.
+        run: |
+          set -euo pipefail
+
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$sdk_root" ]; then
+            echo "::error::Neither ANDROID_SDK_ROOT nor ANDROID_HOME is set on this runner."
+            exit 1
+          fi
+
+          sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$sdkmanager" ]; then
+            sdkmanager="$(find "$sdk_root/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
+          fi
+          if [ -z "$sdkmanager" ] || [ ! -x "$sdkmanager" ]; then
+            echo "::error::No sdkmanager under $sdk_root/cmdline-tools."
+            exit 1
+          fi
+          echo "sdkmanager: $sdkmanager"
+
+          echo '--- installed before ---'
+          "$sdkmanager" --list_installed || true
+
+          # Licences for packages the image already accepted are a no-op; this
+          # is here so a newly-downloaded package cannot block on a prompt.
+          yes | "$sdkmanager" --licenses > /dev/null 2>&1 || true
+
+          echo '--- installing ---'
+          "$sdkmanager" --install \
+            'platforms;android-37.0' \
+            'build-tools;36.0.0' \
+            'ndk;28.2.13676358'
+
+          echo '--- installed after ---'
+          "$sdkmanager" --list_installed || true
+
+          # Every later gate shells out to apksigner and aapt2 from exactly
+          # this build-tools version, not from whatever is first on PATH.
+          echo "ANDROID_BUILD_TOOLS=$sdk_root/build-tools/36.0.0" >> "$GITHUB_ENV"
+
+      - name: Decode the test keystore
+        env:
+          # Secrets reach the shell as environment variables and are never
+          # interpolated into `run:` text anywhere in this workflow. An
+          # interpolated secret is spliced into the script SOURCE, where a
+          # shell trace or an error message can echo it back.
+          KEYSTORE_BASE64: ${{ secrets.GLYPH_TEST_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # Built from $RUNNER_TEMP here rather than from a job-level env
+          # entry: the `runner` context is NOT available in jobs.<job_id>.env,
+          # so a path defined there is rejected before the workflow starts.
+          # Each step that needs it rebuilds it as a shell variable.
+          keystore_path="$RUNNER_TEMP/glyph-ci-test.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$keystore_path"
+          chmod 600 "$keystore_path"
+          # Size only. Never the contents, never a password.
+          echo "Decoded keystore: $(stat -c %s "$keystore_path") bytes"
+
+      - name: Write android/key.properties
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.GLYPH_TEST_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          keystore_path="$RUNNER_TEMP/glyph-ci-test.jks"
+
+          # The four key names, and the fact that an absolute storeFile is used
+          # exactly as given, come from android/app/build.gradle.kts.
+          #
+          # key.properties is parsed by java.util.Properties, where backslash is
+          # the escape character in a VALUE: a password containing a backslash
+          # would be silently mangled, and a "\n" in it would become a real
+          # newline and truncate the value. Double every backslash. Nothing else
+          # needs escaping -- ':' and '=' are only special in a key, '#' and '!'
+          # only at the start of a line, and build.gradle.kts decodes the file
+          # as UTF-8 explicitly, so a non-ASCII password needs no \uXXXX form.
+          escaped_password=${KEYSTORE_PASSWORD//\\/\\\\}
+
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$keystore_path" \
+            "$escaped_password" \
+            'glyphtest' \
+            "$escaped_password" \
+            > android/key.properties
+          chmod 600 android/key.properties
+
+          # Key names only, never values -- the same rule build.gradle.kts
+          # follows for its own error messages.
+          echo "Wrote android/key.properties with keys: storeFile, storePassword, keyAlias, keyPassword"
+
+      - name: Build the test APK
+        env:
+          # This is how the test channel is switched on. `flutter build` owns
+          # the Gradle command line, so -PglyphChannel=test is not available;
+          # ORG_GRADLE_PROJECT_<name> is Gradle's documented environment
+          # equivalent and is what build.gradle.kts reads via
+          # providers.gradleProperty("glyphChannel").
+          ORG_GRADLE_PROJECT_glyphChannel: test
+        run: |
+          set -euo pipefail
+
+          # versionName base from pubspec.yaml, so this does not silently keep
+          # saying 1.0.0 after the app is bumped. "1.0.0+1" -> "1.0.0".
+          version_line="$(grep -m 1 '^version:' pubspec.yaml)"
+          base_version="${version_line#version:}"
+          base_version="${base_version// /}"
+          base_version="${base_version%%+*}"
+          if [ -z "$base_version" ]; then
+            echo "::error::Could not read a version out of pubspec.yaml."
+            exit 1
+          fi
+
+          build_name="${base_version}-test.${GITHUB_RUN_NUMBER}"
+          echo "versionName will be $build_name, versionCode $GITHUB_RUN_NUMBER"
+
+          # Universal APK on purpose: one file, installable on any phone,
+          # no --split-per-abi. No -v/--info/--debug and no build scan: verbose
+          # Gradle logging is exactly where a signing config gets printed.
+          flutter build apk --release \
+            --build-number="$GITHUB_RUN_NUMBER" \
+            --build-name="$build_name"
+
+      - name: 'Gate: signature'
+        run: |
+          set -euo pipefail
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          report="$RUNNER_TEMP/apksigner.txt"
+
+          # NOTE ON WHAT IS *NOT* USED HERE.
+          #
+          # `unzip -l app-release.apk | grep META-INF` is not a signature check
+          # and never will be. AGP defaults to enableV1Signing=false, and a v2
+          # signature lives in the APK Signing Block between the last entry and
+          # the central directory -- not in META-INF. A correctly signed,
+          # v2-only APK shows no .SF/.RSA pair at all, so that grep reports
+          # "unsigned" for a perfectly good artifact and would also report
+          # "signed" for a v1-only one that modern Android rejects. apksigner
+          # is the only tool that actually verifies.
+          "$ANDROID_BUILD_TOOLS/apksigner" verify -v --print-certs "$apk" | tee "$report"
+
+          if ! grep -Fxq 'Verified using v2 scheme (APK Signature Scheme v2): true' "$report"; then
+            echo "::error::APK is not verified under APK Signature Scheme v2."
+            exit 1
+          fi
+
+          normalise() { tr -d ': \r\n' | tr '[:upper:]' '[:lower:]'; }
+
+          actual="$(grep -m 1 -E '^Signer #1 certificate SHA-256 digest:' "$report" \
+            | sed 's/^[^:]*: *//' | normalise)"
+          expected="$(printf '%s' "$EXPECTED_CERT_SHA256" | normalise)"
+          release="$(printf '%s' "$RELEASE_CERT_SHA256" | normalise)"
+
+          if [ -z "$expected" ]; then
+            echo "::error::Repository variable GLYPH_TEST_CERT_SHA256 is empty or unset."
+            exit 1
+          fi
+          if [ -z "$actual" ]; then
+            echo "::error::Could not read a signer certificate SHA-256 out of the apksigner report."
+            exit 1
+          fi
+
+          echo "signer cert sha256: $actual"
+
+          if [ "$actual" = "$release" ]; then
+            echo "::error::This APK is signed with the REAL RELEASE certificate. The test channel must never touch the release key. Refusing to publish."
+            exit 1
+          fi
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Signer certificate $actual does not match repository variable GLYPH_TEST_CERT_SHA256 ($expected)."
+            exit 1
+          fi
+
+          echo 'Signature gate passed: v2 verified, test certificate, not the release certificate.'
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.GLYPH_TEST_CERT_SHA256 }}
+
+      - name: 'Gate: identity and permissions'
+        run: |
+          set -euo pipefail
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          aapt2="$ANDROID_BUILD_TOOLS/aapt2"
+
+          badging="$RUNNER_TEMP/badging.txt"
+          "$aapt2" dump badging "$apk" > "$badging"
+          grep -E '^(package:|application-label:|launchable-activity:)' "$badging" || true
+
+          package="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" "$badging" | head -n 1)"
+          label="$(sed -n "s/^application-label:'\(.*\)'$/\1/p" "$badging" | head -n 1)"
+          version_name="$(sed -n "s/^package:.*versionName='\([^']*\)'.*/\1/p" "$badging" | head -n 1)"
+          version_code="$(sed -n "s/^package:.*versionCode='\([^']*\)'.*/\1/p" "$badging" | head -n 1)"
+
+          if [ "$package" != "$TEST_APPLICATION_ID" ]; then
+            echo "::error::Package is '$package', expected '$TEST_APPLICATION_ID'. A test build with the real application ID would REPLACE the installed Glyph instead of sitting beside it."
+            exit 1
+          fi
+          if [ "$label" != "$TEST_APP_LABEL" ]; then
+            echo "::error::Application label is '$label', expected '$TEST_APP_LABEL'."
+            exit 1
+          fi
+
+          # ---- permissions -------------------------------------------------
+          # Glyph has no network code. The only line that may appear is the
+          # signature-level permission androidx.core declares for the app's own
+          # internal broadcast receivers, namespaced under this build's own
+          # application ID -- so it picks up the .test suffix too.
+          perms="$RUNNER_TEMP/permissions.txt"
+          "$aapt2" dump permissions "$apk" > "$perms"
+          cat "$perms"
+
+          allowed="${TEST_APPLICATION_ID}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+          unexpected="$(grep -E '^(permission|uses-permission)' "$perms" | grep -vF "$allowed" || true)"
+
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected permissions in the test APK. Glyph is offline and must declare no network permission -- in particular not INTERNET, not ACCESS_NETWORK_STATE and not ACCESS_WIFI_STATE. The only allowed line is $allowed."
+            echo "Offending lines:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+          echo "Identity and permission gates passed."
+          {
+            echo "APK_VERSION_NAME=$version_name"
+            echo "APK_VERSION_CODE=$version_code"
+          } >> "$GITHUB_ENV"
+
+      - name: Stage the APK and record its digest
+        run: |
+          set -euo pipefail
+          cp build/app/outputs/flutter-apk/app-release.apk glyph-test.apk
+          digest="$(sha256sum glyph-test.apk | cut -d' ' -f1)"
+          echo "APK_SHA256=$digest" >> "$GITHUB_ENV"
+          echo "glyph-test.apk sha256: $digest"
+
+      - name: Publish the rolling android-test prerelease
+        env:
+          # gh refuses to run inside Actions without a token in the environment.
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CERT_SHA256: ${{ vars.GLYPH_TEST_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+
+          # The tag is this hardcoded literal, never an input and never an
+          # expression. A workflow that can be made to delete an arbitrary tag
+          # by dispatching it with a crafted input is a workflow that can delete
+          # v1.0.0.
+          tag=android-test
+
+          if release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null)"; then
+            if [ "$(printf '%s' "$release_json" | jq -r '.prerelease')" != "true" ]; then
+              echo "::error::A release tagged '$tag' exists and is NOT a prerelease. That is not something this workflow created, so it will not be deleted. Resolve it by hand."
+              exit 1
+            fi
+            echo "Deleting the previous $tag prerelease and its tag."
+            gh release delete "$tag" --cleanup-tag --yes
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > /dev/null 2>&1; then
+            # A bare tag with no release attached. Delete exactly that ref.
+            echo "Deleting a stray $tag tag with no release attached."
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag"
+          else
+            echo "No existing $tag release or tag."
+          fi
+
+          commit_subject="$(git log -1 --format=%s "$GITHUB_SHA")"
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<NOTES
+          Test build, not the friend release. Installs alongside Glyph as "Glyph (test)".
+          Built and gated by CI. Not tested on a physical device by CI.
+
+          | | |
+          |---|---|
+          | Ref | \`$GITHUB_REF\` (branch \`$GITHUB_REF_NAME\`) |
+          | Commit | \`$GITHUB_SHA\` |
+          | Subject | $commit_subject |
+          | Run | $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID |
+          | versionName | \`$APK_VERSION_NAME\` |
+          | versionCode | \`$APK_VERSION_CODE\` |
+          | APK sha256 | \`$APK_SHA256\` |
+          | Test certificate SHA-256 | \`$EXPECTED_CERT_SHA256\` |
+
+          This APK is signed with the CI test key, which is not the release key.
+          It has application ID \`com.glyphpad.glyph.test\`, so installing it will
+          not touch or replace an installed copy of Glyph, and the two keep
+          entirely separate saved keys.
+          NOTES
+
+          # A tag deletion can take a moment to propagate before the same name
+          # can be created again.
+          for attempt in 1 2 3; do
+            if gh release create "$tag" glyph-test.apk \
+                 --prerelease \
+                 --latest=false \
+                 --target "$GITHUB_SHA" \
+                 --title "Android test build #$GITHUB_RUN_NUMBER" \
+                 --notes-file "$notes"; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not create the $tag release after 3 attempts."
+              exit 1
+            fi
+            echo "Create failed, retrying in 5s (attempt $attempt)."
+            sleep 5
+          done
+
+      - name: Verify the published asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Publishing is the step most likely to fail silently: a truncated
+          # upload still produces a release page with a download button on it.
+          # Fetch the asset back and compare it to what was gated.
+          dir="$RUNNER_TEMP/published"
+          rm -rf "$dir"
+          mkdir -p "$dir"
+          gh release download android-test --pattern glyph-test.apk --dir "$dir"
+
+          published="$(sha256sum "$dir/glyph-test.apk" | cut -d' ' -f1)"
+          echo "published sha256: $published"
+          echo "expected  sha256: $APK_SHA256"
+
+          if [ "$published" != "$APK_SHA256" ]; then
+            echo "::error::The published asset does not match the APK that passed the gates."
+            exit 1
+          fi
+          echo 'Published asset matches the gated APK.'
+
+      - name: Remove the keystore and key.properties
+        if: always()
+        run: |
+          set -euo pipefail
+          keystore_path="$RUNNER_TEMP/glyph-ci-test.jks"
+          rm -f "$keystore_path" android/key.properties
+          echo 'Removed the decoded keystore and android/key.properties.'

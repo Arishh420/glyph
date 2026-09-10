@@ -1,0 +1,26 @@
+# Test tags.
+#
+# Declared here so `flutter test` does not warn about an unrecognised tag, and
+# so the meaning of the tag lives somewhere other than in a CI command line.
+#
+# Nothing is skipped by default: a plain `flutter test` still runs every test in
+# the suite on the Dart VM. The tag only exists so the browser run can exclude
+# the handful of tests that cannot pass there:
+#
+#   flutter test                                        # all of them, on the VM
+#   flutter test --platform chrome --exclude-tags vm-only
+tags:
+  vm-only:
+    # A test that asserts the *native* branch of one of the three conditional
+    # exports (glyph_codec_factory, key_store_factory, secure_context), or that
+    # drives IsolateGlyphCodec directly.
+    #
+    # dart:isolate compiles on the web but every call throws UnsupportedError,
+    # and on the web kCodecUsesIsolate and kKeyStorePersists are both false by
+    # design. These tests are therefore asserting something that is only true
+    # off the web -- they are not broken, and they are not skipped anywhere
+    # except in the browser.
+    #
+    # Tag individual tests, never whole files. Seven of the eight tests in
+    # glyph_worker_test.dart need this; the eighth does not, because it never
+    # spawns an isolate.

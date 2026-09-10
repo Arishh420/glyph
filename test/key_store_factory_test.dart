@@ -13,10 +13,12 @@ import 'package:glyph/data/secure_key_store.dart';
 /// read it, and native falling through to the web branch would silently forget
 /// the user's key on every launch.
 void main() {
+  // vm-only: on the web this export resolves to InMemoryKeyStore and
+  // kKeyStorePersists is false, which is the whole point of the web branch.
   test('a native build persists the key in the platform keychain', () {
     expect(kKeyStorePersists, isTrue);
     expect(createKeyStore(), isA<SecureKeyStore>());
-  });
+  }, tags: 'vm-only');
 
   test('the in-memory store a web build gets round-trips within a session', () async {
     // This is the implementation a browser gets, exercised here because a

@@ -15,12 +15,14 @@ import 'glyph_page_test.dart' show pumpGlyph;
 /// phone being blocked behind a browser-only warning.
 void main() {
   group('the no-persistence notice', () {
+    // vm-only: in a browser kKeyStorePersists is false and the notice is
+    // supposed to be there, so this assertion is inverted on the web.
     testWidgets('is absent on a build that does persist the key',
         (WidgetTester tester) async {
       expect(kKeyStorePersists, isTrue);
       await pumpGlyph(tester);
       expect(find.textContaining('not saved in the browser'), findsNothing);
-    });
+    }, tags: 'vm-only');
   });
 
   group('the secure-context gate', () {

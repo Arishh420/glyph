@@ -11,12 +11,14 @@ import 'package:glyph/core/glyph_worker.dart';
 /// moving key stretching onto the UI thread on a phone -- a regression that
 /// would show up as jank rather than as a failure.
 void main() {
+  // vm-only: on the web this same export resolves to InlineGlyphCodec and
+  // kCodecUsesIsolate is false, which is correct there, not a regression.
   test('a native build stretches keys on a worker isolate', () {
     expect(kCodecUsesIsolate, isTrue);
     final codec = createGlyphCodec();
     addTearDown(codec.dispose);
     expect(codec, isA<IsolateGlyphCodec>());
-  });
+  }, tags: 'vm-only');
 
   test('the factory codec round-trips', () async {
     final codec = createGlyphCodec();
