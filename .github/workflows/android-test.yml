@@ -424,3 +424,359 @@ jobs:
           keystore_path="$RUNNER_TEMP/glyph-ci-test.jks"
           rm -f "$keystore_path" android/key.properties
           echo 'Removed the decoded keystore and android/key.properties.'
+
+  build-and-deploy-web:
+    name: Build and deploy the web test site
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      # Read this repository, and nothing else. The push goes to the SEPARATE
+      # repository Arishh420/glyph-web-test over SSH with a deploy key scoped to
+      # that repository alone. GITHUB_TOKEN is deliberately not used: it cannot
+      # reach another repository anyway, and `contents: write` here would hand
+      # this job write access to Glyph's own gh-pages branch -- the live site
+      # that friends use. This job must never be able to touch it.
+      contents: read
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Flutter
+        uses: ./.github/actions/setup-flutter
+
+      - name: Install dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Build the web test site
+        run: |
+          set -euo pipefail
+
+          # ------------------------------------------------------------------
+          # THE ONE PLACE THE WEB BUILD FLAGS LIVE.
+          #
+          # --base-href          must match the Pages path, /glyph-web-test/.
+          #                      Wrong, and every asset 404s into a white screen.
+          # --pwa-strategy=none  no service worker is registered. Flutter's own
+          #                      service worker is deprecated and, as of 3.47.2,
+          #                      does nothing but unregister itself; leaving it
+          #                      out removes a moving part from the bug hunt.
+          #
+          # CanvasKit is LEFT ON www.gstatic.com, exactly as the live site has
+          # it. The first deploy exists to reproduce the phone-only bugs under
+          # the live site's conditions minus the service worker, so this is the
+          # one thing that must NOT change yet. To self-host CanvasKit later,
+          # uncomment the single line below. That is the whole change.
+          # ------------------------------------------------------------------
+          build_flags=(
+            --release
+            --base-href /glyph-web-test/
+            --pwa-strategy=none
+            # --no-web-resources-cdn
+          )
+
+          echo "flutter build web ${build_flags[*]}"
+          flutter build web "${build_flags[@]}"
+
+      - name: Relabel the built copy as the test site
+        run: |
+          set -euo pipefail
+
+          # Relabels build/web ONLY. web/ is never touched, so the sources the
+          # live site is built from stay byte-identical and `git status` in a
+          # later step would still be clean.
+          #
+          # Every edit asserts its anchor appears exactly once and fails the
+          # step if it does not. A relabel that quietly matches nothing is the
+          # failure mode to fear: the build still deploys, and the title on the
+          # phone's home screen is the only thing that would have told the owner
+          # they are looking at the test site and not the real one.
+          #
+          # Python rather than sed: these are literal replacements with no regex
+          # intent, one of them spans a newline, and GNU sed and BSD sed do not
+          # agree about newlines in a replacement. Python behaves the same on
+          # the runner and on the owner's Mac, which is what makes this testable
+          # before it is merged.
+          python3 - <<'PY'
+          import sys, pathlib
+
+          edits = [
+              ("build/web/index.html",
+               '<title>Glyph</title>',
+               '<title>Glyph (test)</title>'),
+              ("build/web/index.html",
+               '<meta name="apple-mobile-web-app-title" content="Glyph">',
+               '<meta name="apple-mobile-web-app-title" content="Glyph (test)">'),
+              # Keep the test site out of search results. Anchored on the
+              # charset line, so a reshuffled web/index.html fails loudly here
+              # rather than silently skipping the insert.
+              ("build/web/index.html",
+               '<meta charset="UTF-8">',
+               '<meta charset="UTF-8">\n  <meta name="robots" content="noindex">'),
+              # Anchored with their leading indentation, so that the "name"
+              # edit cannot also match the "short_name" line.
+              ("build/web/manifest.json",
+               '    "name": "Glyph",',
+               '    "name": "Glyph (test)",'),
+              ("build/web/manifest.json",
+               '    "short_name": "Glyph",',
+               '    "short_name": "Glyph (test)",'),
+          ]
+
+          failed = False
+          for path, frm, to in edits:
+              p = pathlib.Path(path)
+              s = p.read_text(encoding="utf-8")
+              n = s.count(frm)
+              if n != 1:
+                  print(f"::error::Expected exactly one occurrence of {frm!r} in {path}, "
+                        f"found {n}. The web template has changed and the relabel is out of date.")
+                  failed = True
+                  continue
+              p.write_text(s.replace(frm, to), encoding="utf-8")
+              print(f"  {path}: {frm!r} -> {to!r}")
+
+          sys.exit(1 if failed else 0)
+          PY
+
+          # GitHub Pages runs Jekyll over the branch unless told not to, and
+          # Jekyll drops every path that begins with an underscore. The live
+          # site's gh-pages branch carries this file; the test site must too.
+          touch build/web/.nojekyll
+          echo 'Relabel complete; .nojekyll written.'
+
+      - name: 'Gate: the built site is the test site and registers no service worker'
+        run: |
+          set -euo pipefail
+
+          web=build/web
+          index="$web/index.html"
+          bootstrap="$web/flutter_bootstrap.js"
+          failed=0
+
+          require() {
+            if grep -Fq -- "$2" "$1"; then
+              echo "  ok: $1 contains $2"
+            else
+              echo "::error::$1 does not contain $2"
+              failed=1
+            fi
+          }
+
+          echo '--- index.html ---'
+          require "$index" '<base href="/glyph-web-test/">'
+          require "$index" '<meta name="robots" content="noindex">'
+          require "$index" '<title>Glyph (test)</title>'
+          require "$index" '<meta name="apple-mobile-web-app-title" content="Glyph (test)">'
+
+          # Belt and braces. The live site's base href must not have survived.
+          if grep -Fq -- '<base href="/glyph/">' "$index"; then
+            echo '::error::index.html still carries the LIVE site base href.'
+            failed=1
+          fi
+
+          echo '--- manifest.json ---'
+          for field in name short_name; do
+            value="$(jq -r ".$field" "$web/manifest.json")"
+            if [ "$value" = 'Glyph (test)' ]; then
+              echo "  ok: manifest $field is 'Glyph (test)'"
+            else
+              echo "::error::manifest $field is '$value', expected 'Glyph (test)'."
+              failed=1
+            fi
+          done
+
+          echo '--- service worker ---'
+          # WHAT "CONTAINS NO SERVICE-WORKER REGISTRATION" MEANS HERE.
+          #
+          # flutter_bootstrap.js is the SDK's minified flutter.js, plus the
+          # build config, plus one `_flutter.loader.load(...)` call. flutter.js
+          # ALWAYS carries its ServiceWorkerLoader class, so the strings
+          # `serviceWorkerSettings`, `serviceWorkerVersion`, `serviceWorkerUrl`,
+          # `navigator.serviceWorker.register` and `flutter_service_worker.js`
+          # are in EVERY build -- six matches even with --pwa-strategy=none,
+          # counted on a real 3.47.2 build. A grep for "serviceWorker" over the
+          # whole file would therefore fail a perfectly good no-SW build.
+          #
+          # What decides it is the argument to the single
+          # `_flutter.loader.load(` call. The loader destructures
+          # `{serviceWorkerSettings: e}` off it and, when `e` is undefined, does
+          # nothing whatsoever -- it does not even construct the loader. So the
+          # assertion is scoped to that call site.
+          calls="$(grep -c -F '_flutter.loader.load(' "$bootstrap" || true)"
+          if [ "$calls" != "1" ]; then
+            echo "::error::Expected exactly one _flutter.loader.load( call in flutter_bootstrap.js, found $calls. The shape this gate relies on has changed."
+            failed=1
+          fi
+
+          call_site="$(sed -n '/_flutter\.loader\.load(/,$p' "$bootstrap")"
+          echo '  call site:'
+          printf '%s\n' "$call_site"
+          if printf '%s' "$call_site" | grep -qi 'serviceworker'; then
+            echo '::error::The _flutter.loader.load() call site mentions a service worker. This build would register one.'
+            failed=1
+          else
+            echo '  ok: the load() call passes no serviceWorkerSettings'
+          fi
+
+          # --pwa-strategy=none still EMITS flutter_service_worker.js, as a
+          # zero-byte file. Nothing ever requests it, and an empty script could
+          # not install as a worker if anything did. A non-empty one here would
+          # mean the strategy flag did not take.
+          sw="$web/flutter_service_worker.js"
+          if [ -e "$sw" ] && [ -s "$sw" ]; then
+            echo "::error::$sw is $(wc -c < "$sw") bytes. With --pwa-strategy=none it must be empty or absent."
+            failed=1
+          else
+            echo '  ok: flutter_service_worker.js is empty or absent'
+          fi
+
+          echo '--- canvaskit ---'
+          # Reported, not asserted. The first deploy deliberately keeps the live
+          # site's CDN setting, and a later switch should be visible in the log
+          # of the run that made it. Read off the build config specifically:
+          # flutter.js names `useLocalCanvasKit` in its own source, so grepping
+          # the whole file proves nothing.
+          if grep -Fq '"useLocalCanvasKit":true' "$bootstrap"; then
+            echo '  CanvasKit: SELF-HOSTED from this site (build config sets useLocalCanvasKit).'
+          else
+            echo '  CanvasKit: loaded from www.gstatic.com, same as the live site.'
+          fi
+
+          echo '--- .nojekyll ---'
+          if [ -f "$web/.nojekyll" ]; then
+            echo '  ok: .nojekyll present'
+          else
+            echo '::error::.nojekyll is missing. GitHub Pages would run Jekyll and drop underscore-prefixed paths.'
+            failed=1
+          fi
+
+          if [ "$failed" != 0 ]; then
+            echo '::error::Web gate failed. Nothing is deployed.'
+            exit 1
+          fi
+          echo 'Web gate passed.'
+
+      - name: Write the deploy key and pin GitHub's host key
+        env:
+          # The secret reaches the shell as an environment variable and is never
+          # interpolated into `run:` text anywhere in this workflow. An
+          # interpolated secret is spliced into the script SOURCE, where a shell
+          # trace or an error message can echo it back.
+          DEPLOY_KEY: ${{ secrets.GLYPH_WEB_TEST_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          # Rebuilt from $RUNNER_TEMP in every step that needs it: the `runner`
+          # context is NOT available in jobs.<job_id>.env, so a path defined
+          # there would be rejected before the workflow starts.
+          key_path="$RUNNER_TEMP/glyph-web-test-deploy-key"
+          known_hosts="$RUNNER_TEMP/glyph-web-test-known-hosts"
+
+          # An OpenSSH private key must end in a newline. One extra is harmless.
+          printf '%s\n' "$DEPLOY_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          # A key fingerprint is public information -- it is derived from the
+          # PUBLIC half. Printing it proves the secret decoded to a real key
+          # without revealing any part of the private one.
+          ssh-keygen -lf "$key_path" < /dev/null
+
+          # github.com's published ed25519 host key, pinned rather than trusted
+          # on first use. StrictHostKeyChecking=no would accept whatever answers
+          # on port 22, which is the entire attack this is here to prevent.
+          # Published at
+          # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+          # and served over HTTPS from https://api.github.com/meta.
+          # Expected fingerprint: SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+          cat > "$known_hosts" <<'HOSTKEY'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          HOSTKEY
+          chmod 600 "$known_hosts"
+
+          expected_fingerprint='SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
+          actual_fingerprint="$(ssh-keygen -lf "$known_hosts" | awk '{print $2}')"
+          echo "pinned host key fingerprint: $actual_fingerprint"
+          if [ "$actual_fingerprint" != "$expected_fingerprint" ]; then
+            echo "::error::The pinned github.com host key hashes to $actual_fingerprint, not $expected_fingerprint. The literal in this workflow has been altered."
+            exit 1
+          fi
+          echo 'Deploy key written and github.com host key pinned.'
+
+      - name: Deploy to Arishh420/glyph-web-test gh-pages
+        run: |
+          set -euo pipefail
+
+          key_path="$RUNNER_TEMP/glyph-web-test-deploy-key"
+          known_hosts="$RUNNER_TEMP/glyph-web-test-known-hosts"
+
+          # IdentitiesOnly + IdentityAgent=none: offer this key and no other.
+          # GlobalKnownHostsFile=/dev/null: the runner image ships a populated
+          # /etc/ssh/ssh_known_hosts, and without this the pin above would be
+          # decorative -- ssh would accept the system entry instead.
+          export GIT_SSH_COMMAND="ssh -i $key_path -o IdentitiesOnly=yes -o IdentityAgent=none -o UserKnownHostsFile=$known_hosts -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o PasswordAuthentication=no"
+
+          # ONE ORPHAN COMMIT, EVERY TIME.
+          #
+          # A fresh repository inside build/web, committed once and force-pushed,
+          # replaces the branch outright. Builds are never stacked in history:
+          # this is a rolling test site, every run is a full replacement, and a
+          # growing history of multi-megabyte main.dart.js blobs would be a
+          # repository that has to be deleted to be fixed.
+          #
+          # core.excludesFile=/dev/null so that a global gitignore on the runner
+          # cannot silently drop a file from the deploy.
+          git -C build/web -c core.excludesFile=/dev/null init -q -b gh-pages
+          git -C build/web config user.name 'github-actions[bot]'
+          git -C build/web config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C build/web -c core.excludesFile=/dev/null add -A
+
+          message="$RUNNER_TEMP/web-deploy-message.txt"
+          cat > "$message" <<MESSAGE
+          Test site build from $GITHUB_SHA
+
+          Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Source commit: $GITHUB_REPOSITORY@$GITHUB_SHA
+          Ref: $GITHUB_REF
+
+          This branch is replaced wholesale by every run. It is not the live
+          site; the live site is the gh-pages branch of $GITHUB_REPOSITORY.
+          MESSAGE
+
+          git -C build/web commit -q -F "$message"
+
+          # The §14 rule, made mechanical rather than remembered.
+          commits="$(git -C build/web rev-list --count HEAD)"
+          if [ "$commits" != "1" ]; then
+            echo "::error::build/web has $commits commits; a deploy must be a single orphan commit."
+            exit 1
+          fi
+
+          tracked="$(git -C build/web ls-files)"
+          echo "Publishing $(printf '%s\n' "$tracked" | wc -l) files:"
+          printf '%s\n' "$tracked" | sed -n '1,40p'
+
+          for required in .nojekyll index.html flutter_bootstrap.js main.dart.js manifest.json; do
+            if ! printf '%s\n' "$tracked" | grep -Fxq "$required"; then
+              echo "::error::$required is not in the commit that would be published."
+              exit 1
+            fi
+          done
+
+          # The destination is these two literals and nothing else. Not an
+          # input, not an expression, not a variable built from one: a workflow
+          # whose push target can be steered by a dispatch input is a workflow
+          # that can be made to overwrite the live site.
+          git -C build/web push --force \
+            git@github.com:Arishh420/glyph-web-test.git \
+            HEAD:refs/heads/gh-pages
+
+          echo 'Deployed. https://arishh420.github.io/glyph-web-test/'
+
+      - name: Remove the deploy key and the pinned known_hosts
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/glyph-web-test-deploy-key" \
+                "$RUNNER_TEMP/glyph-web-test-known-hosts"
+          echo 'Removed the deploy key and the pinned known_hosts file.'
